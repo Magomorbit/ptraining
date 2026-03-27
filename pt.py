@@ -134,3 +134,58 @@ else:
 if st.sidebar.button("Internal Sync", help="비밀 백업 및 동기화"):
     backup_db(reason="manual")
     st.sidebar.write("✅ 시스템 백업 완료")
+
+import google.generativeai as genai
+
+# --- 제미나이 API 설정 ---
+st.sidebar.divider()
+st.sidebar.subheader("🤖 제미나이 AI 연동")
+api_key = st.sidebar.text_input("Gemini API Key를 입력하세요", type="password")
+
+if api_key:
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+
+def generate_regex_with_gemini(db_data):
+    """학습 데이터를 기반으로 제미나이에게 정규식 생성을 요청"""
+    # 학습 데이터 요약
+    patterns_str = ""
+    for p in sorted(db_data['patterns'], key=lambda x: x['weight'], reverse=True):
+        patterns_str += f"- 패턴 규칙: {p['rule']} (실제 예시: {p['example']}, 빈도: {p['weight']})\n"
+    
+    prompt = f"""
+    너는 정규표현식 전문가야. 아래는 소설 파일에서 추출한 '실제 목차' 패턴들이야.
+    이 패턴들을 모두 포괄하면서, 일반적인 본문 문장과 겹치지 않는 최적의 Python 정규표현식(Regex)을 하나만 만들어줘.
+    
+    [학습된 패턴 데이터]
+    {patterns_str}
+    
+    [요구사항]
+    1. `re.search()` 또는 `re.match()`에서 사용할 수 있는 형태여야 함.
+    2. 가중치(빈도)가 높은 패턴을 최우선으로 고려할 것.
+    3. 결과물은 코드 블럭 없이 정규식 문자열만 출력해줘. (예: ^제\s?\d+\s?[화장])
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        return f"오류 발생: {str(e)}"
+
+# --- UI 반영 (데이터 관리 탭 하단 혹은 사이드바) ---
+if st.sidebar.button("✨ 최적의 정규식 생성하기"):
+    if not api_key:
+        st.sidebar.error("API Key가 필요합니다.")
+    else:
+        db = load_db()
+        if not db['patterns']:
+            st.sidebar.warning("학습된 데이터가 없습니다.")
+        else:
+            with st.spinner("제미나이가 패턴을 분석 중..."):
+                final_regex = generate_regex_with_gemini(db)
+                st.session_state['generated_regex'] = final_regex
+
+if 'generated_regex' in st.session_state:
+    st.info("### 🎯 제미나이가 생성한 최적의 정규식")
+    st.code(st.session_state['generated_regex'], language='python')
+    st.success("이 정규표현식을 변환기 앱의 목차 인식 로직에 그대로 사용하세요.")
