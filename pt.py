@@ -5,38 +5,49 @@ import os
 import chardet
 import google.generativeai as genai
 
-# --- 1. 데이터 관리 로직 ---
+# --- 1. 데이터 관리 로직 (더욱 방어적인 설계) ---
 LEARNING_DB = "gemini_instruction_data.json"
 
 def load_db():
+    default_structure = {"total_count": 0, "patterns": [], "raw_examples": []}
     if os.path.exists(LEARNING_DB):
         try:
             with open(LEARNING_DB, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # 데이터 구조가 깨져있을 경우를 대비한 보정
-                if not isinstance(data, dict):
-                    return {"total_count": 0, "patterns": [], "raw_examples": []}
-                return data
+                if isinstance(data, dict):
+                    # 필수 키가 있는지 확인
+                    for key in default_structure.keys():
+                        if key not in data:
+                            data[key] = default_structure[key]
+                    return data
         except:
-            pass
-    return {"total_count": 0, "patterns": [], "raw_examples": []}
+            return default_structure
+    return default_structure
 
 def save_db(data):
-    # 중요: 저장 전 모든 데이터를 문자열화하여 TypeError 방지
-    clean_data = {
-        "total_count": int(data.get("total_count", 0)),
-        "patterns": [],
-        "raw_examples": [str(x) for x in data.get("raw_examples", [])]
-    }
-    for p in data.get("patterns", []):
-        clean_data["patterns"].append({
-            "rule": str(p["rule"]),
-            "example": str(p["example"]),
-            "weight": int(p["weight"])
-        })
-    
-    with open(LEARNING_DB, "w", encoding="utf-8") as f:
-        json.dump(clean_data, f, ensure_all_ascii=False, indent=4)
+    """
+    JSON 저장 시 발생할 수 있는 TypeError를 원천 차단하기 위해
+    모든 데이터를 원시 타입(str, int)으로 완전히 새로 재구성합니다.
+    """
+    try:
+        new_patterns = []
+        for p in data.get("patterns", []):
+            new_patterns.append({
+                "rule": str(p.get("rule", "")),
+                "example": str(p.get("example", "")),
+                "weight": int(p.get("weight", 1))
+            })
+            
+        clean_data = {
+            "total_count": int(len(data.get("raw_examples", []))),
+            "patterns": new_patterns,
+            "raw_examples": [str(x) for x in data.get("raw_examples", [])]
+        }
+        
+        with open(LEARNING_DB, "w", encoding="utf-8") as f:
+            json.dump(clean_data, f, ensure_all_ascii=False, indent=4)
+    except Exception as e:
+        st.error(f"데이터 저장 중 치명적 오류 발생: {e}")
 
 # --- 2. 언어 및 인코딩 처리 로직 ---
 def smart_decode(raw_data):
@@ -54,9 +65,10 @@ def smart_decode(raw_data):
             return raw_data.decode('utf-8', errors='ignore'), 'utf-8 (fallback)'
 
 def analyze_pattern(text):
+    # 정규식 특수문자 보호 및 숫자 치환
     pattern = re.escape(str(text))
     pattern = re.sub(r'\d+', '[NUM]', pattern)
-    return pattern
+    return str(pattern)
 
 # --- 3. UI 레이아웃 ---
 st.set_page_config(page_title="TOC Pattern Master", layout="wide")
@@ -83,32 +95,38 @@ with tab1:
 
         if candidates:
             st.subheader("✅ 실제 목차 선택")
-            selected_items = []
-            # 파일명을 기반으로 고유 세션 생성
-            for idx, cand in enumerate(candidates):
-                if st.checkbox(f"L{cand['line']}: {cand['text']}", key=f"chk_{uploaded_file.name}_{idx}"):
-                    selected_items.append(str(cand['text']))
-
-            if st.button("📌 선택한 패턴 저장"):
-                if selected_items:
-                    db = load_db()
-                    for item in selected_items:
-                        abstract = analyze_pattern(item)
-                        found = False
-                        for p in db['patterns']:
-                            if p['rule'] == abstract:
-                                p['weight'] += 1
-                                found = True
-                                break
-                        if not found:
-                            db['patterns'].append({"rule": abstract, "example": item, "weight": 1})
-                        if item not in db['raw_examples']:
-                            db['raw_examples'].append(item)
-                    
-                    db['total_count'] = len(db['raw_examples'])
-                    save_db(db) # 여기서 정제된 데이터가 저장됨
-                    st.success("데이터가 안전하게 저장되었습니다!")
-                    st.rerun()
+            # 폼을 사용하여 버튼 클릭 시에만 데이터가 처리되도록 격리
+            with st.form("learning_form"):
+                selected_items = []
+                cols = st.columns(2)
+                for idx, cand in enumerate(candidates):
+                    # 파일명과 인덱스를 조합해 고유 키 생성
+                    if cols[idx % 2].checkbox(f"L{cand['line']}: {cand['text']}", key=f"c_{uploaded_file.name}_{idx}"):
+                        selected_items.append(str(cand['text']))
+                
+                submit = st.form_submit_button("📌 선택한 패턴 저장")
+                
+                if submit:
+                    if selected_items:
+                        db = load_db()
+                        for item in selected_items:
+                            abstract = analyze_pattern(item)
+                            found = False
+                            for p in db['patterns']:
+                                if p['rule'] == abstract:
+                                    p['weight'] += 1
+                                    found = True
+                                    break
+                            if not found:
+                                db['patterns'].append({"rule": abstract, "example": item, "weight": 1})
+                            if item not in db['raw_examples']:
+                                db['raw_examples'].append(item)
+                        
+                        save_db(db)
+                        st.success("데이터가 성공적으로 저장되었습니다.")
+                        st.rerun()
+                    else:
+                        st.warning("선택된 항목이 없습니다.")
 
 with tab2:
     st.subheader("🗑️ 학습된 데이터 관리")
@@ -117,28 +135,32 @@ with tab2:
         sorted_p = sorted(db['patterns'], key=lambda x: x['weight'], reverse=True)
         for i, p in enumerate(sorted_p):
             c1, c2, c3 = st.columns([3, 2, 1])
-            c1.code(p['rule'].replace("\\", ""))
+            c1.code(str(p['rule']).replace("\\", ""))
             c2.write(f"빈도: {p['weight']}")
             if c3.button("삭제", key=f"del_{i}"):
                 db['patterns'] = [item for item in db['patterns'] if item['rule'] != p['rule']]
                 save_db(db)
                 st.rerun()
+        
+        st.divider()
         if st.button("⚠️ 초기화"):
             save_db({"total_count": 0, "patterns": [], "raw_examples": []})
             st.rerun()
 
 # --- 4. 제미나이 생성 로직 ---
-if api_key and st.sidebar.button("✨ 최적 정규식 생성"):
-    db = load_db()
-    if db['patterns']:
-        try:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            p_info = "\n".join([f"- {p['rule']} (빈도:{p['weight']})" for p in db['patterns']])
-            resp = model.generate_content(f"다음 패턴을 모두 잡는 Python 정규식 하나만 출력해:\n{p_info}")
-            st.session_state['res'] = resp.text.strip()
-        except Exception as e:
-            st.sidebar.error(f"오류: {e}")
+if api_key:
+    genai.configure(api_key=api_key)
+    if st.sidebar.button("✨ 최적 정규식 생성"):
+        db = load_db()
+        if db['patterns']:
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                p_info = "\n".join([f"- {p['rule']} (빈도:{p['weight']})" for p in db['patterns']])
+                resp = model.generate_content(f"다음은 소설의 목차 패턴들이야. 이들을 모두 매칭하는 Python 정규식 하나만 문자열로 출력해:\n{p_info}")
+                st.session_state['res_regex'] = resp.text.strip()
+            except Exception as e:
+                st.sidebar.error(f"API 오류: {e}")
 
-if 'res' in st.session_state:
-    st.sidebar.code(st.session_state['res'])
+if 'res_regex' in st.session_state:
+    st.sidebar.success("생성된 정규표현식:")
+    st.sidebar.code(st.session_state['res_regex'])
