@@ -4,11 +4,10 @@ import json
 import os
 import chardet
 
-# --- 1. 데이터 관리 레이어 (동기화 강화) ---
+# --- 1. 데이터 관리 레이어 ---
 DB_FILE = "toc_database.json"
 
 def load_persistent_db():
-    """파일 시스템에서 최신 데이터를 강제로 읽어옴"""
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -20,7 +19,7 @@ def load_persistent_db():
     return {"patterns": [], "total_learned": 0}
 
 def save_persistent_db(data):
-    """데이터를 파일에 쓰고, 현재 세션 상태도 즉시 동기화"""
+    """ensure_ascii=False 로 수정하여 한글 저장 보장"""
     try:
         clean_data = {
             "patterns": [
@@ -33,16 +32,16 @@ def save_persistent_db(data):
             "total_learned": int(data.get("total_learned", 0))
         }
         with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(clean_data, f, ensure_all_ascii=False, indent=4)
+            # [수정 완료] ensure_all_ascii -> ensure_ascii
+            json.dump(clean_data, f, ensure_ascii=False, indent=4)
         
-        # [중요] 세션 상태를 파일에 쓴 데이터와 완전히 일치시킴
         st.session_state.db = clean_data
         return True
     except Exception as e:
         st.error(f"❌ 저장 실패: {e}")
         return False
 
-# --- 2. 인코딩 및 추출 엔진 (기존 유지) ---
+# --- 2. 인코딩 엔진 ---
 def smart_decode(raw_data, manual_enc=None):
     if manual_enc and manual_enc != "자동 감지":
         try: return raw_data.decode(manual_enc), manual_enc
@@ -55,6 +54,7 @@ def smart_decode(raw_data, manual_enc=None):
         except: continue
     return raw_data.decode('utf-8', errors='ignore'), 'utf-8(fallback)'
 
+# --- 3. 목차 후보 추출 ---
 def get_logical_candidates(lines):
     raw_list = []
     for i, line in enumerate(lines):
@@ -79,11 +79,10 @@ def get_logical_candidates(lines):
                         break
     return [c for c in raw_list if c['valid']]
 
-# --- 3. 메인 UI ---
-st.set_page_config(page_title="TOC Master (Sync Fix)", layout="wide")
+# --- 4. 메인 UI ---
+st.set_page_config(page_title="TOC Master (Final Fix)", layout="wide")
 st.title("🧠 목차 패턴 학습기")
 
-# 앱 시작 시 DB 로드
 if 'db' not in st.session_state:
     st.session_state.db = load_persistent_db()
 
@@ -91,9 +90,9 @@ if 'db' not in st.session_state:
 st.sidebar.title("🛠️ 시스템 관리")
 st.sidebar.caption(f"ID: goepark | 패턴 수: {len(st.session_state.db['patterns'])}")
 
-# 현재 상태 다운로드
+# 다운로드 버튼 (수정 완료)
 try:
-    final_db_str = json.dumps(st.session_state.db, ensure_all_ascii=False, indent=4)
+    final_db_str = json.dumps(st.session_state.db, ensure_ascii=False, indent=4)
 except:
     final_db_str = "{}"
 st.sidebar.download_button("💾 현재 DB 다운로드", final_db_str, "toc_database.json")
@@ -109,13 +108,13 @@ with tab1:
         candidates = get_logical_candidates(content.splitlines())
         if candidates:
             st.subheader(f"✅ 후보군 ({len(candidates)}개)")
-            # [수정] 버튼 클릭 시 즉시 DB 업데이트 후 리런
+            
+            # 저장 버튼을 상단에 배치
             if st.button("📌 선택 패턴 누적 저장", type="primary", use_container_width=True):
-                # 세션에서 체크박스 상태 확인 (Key 매칭)
                 selected_items = [c['text'] for idx, c in enumerate(candidates) if st.session_state.get(f"chk_{file_id}_{idx}")]
                 
                 if selected_items:
-                    current_db = load_persistent_db() # 최신 파일 상태 먼저 가져오기
+                    current_db = load_persistent_db()
                     for item in selected_items:
                         rule = re.sub(r'\d+', '[NUM]', re.escape(str(item)))
                         found = False
@@ -128,8 +127,8 @@ with tab1:
                             current_db['patterns'].append({"rule": rule, "example": str(item), "weight": 1})
                     
                     if save_persistent_db(current_db):
-                        st.success("저장 완료! 데이터 관리 탭에서 확인하세요.")
-                        st.rerun() # 화면 강제 갱신
+                        st.success("저장 완료!")
+                        st.rerun()
                 else:
                     st.warning("선택된 패턴이 없습니다.")
             
@@ -139,12 +138,12 @@ with tab1:
                 cols[idx % 2].checkbox(f"L{cand['idx']+1}: {cand['text']}", key=f"chk_{file_id}_{idx}")
 
 with tab2:
-    # [수정] 탭을 클릭할 때마다 항상 최신 파일을 다시 읽어오도록 보장
+    # 데이터 관리 탭에 진입할 때마다 최신 파일을 읽어옴
     current_db = load_persistent_db()
     st.subheader(f"⚙️ 누적 패턴 리스트 (총 {len(current_db['patterns'])}개)")
     
     if not current_db['patterns']:
-        st.info("학습된 데이터가 없습니다. 먼저 패턴을 학습시켜 주세요.")
+        st.info("학습된 데이터가 없습니다.")
     else:
         patterns = sorted(current_db['patterns'], key=lambda x: x['weight'], reverse=True)
         for i, p in enumerate(patterns):
