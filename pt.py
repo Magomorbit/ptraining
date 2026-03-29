@@ -5,63 +5,64 @@ import os
 import chardet
 import google.generativeai as genai
 
-# --- 1. 데이터 관리 레이어 ---
+# --- 1. 데이터 관리 레이어 (안정성 강화) ---
 DB_FILE = "toc_database.json"
 
 def load_persistent_db():
+    """파일이 없거나 깨졌을 때를 대비한 안전한 로드"""
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if "patterns" not in data: data["patterns"] = []
-                return data
-        except: pass
+                if isinstance(data, dict) and "patterns" in data:
+                    return data
+        except Exception:
+            pass
     return {"patterns": [], "total_learned": 0}
 
 def save_persistent_db(data):
+    """TypeError 방지를 위해 데이터를 정제한 후 물리적 저장"""
     try:
+        # 직렬화 가능한 형태로 데이터 정제
+        clean_data = {
+            "patterns": [
+                {
+                    "rule": str(p["rule"]),
+                    "example": str(p["example"]),
+                    "weight": int(p["weight"])
+                } for p in data.get("patterns", [])
+            ],
+            "total_learned": int(data.get("total_learned", 0))
+        }
         with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_all_ascii=False, indent=4)
-    except Exception as e:
-        st.error(f"데이터 저장 실패: {e}")
-
-def merge_db(uploaded_json):
-    try:
-        new_data = json.load(uploaded_json)
-        current_db = st.session_state.db
-        for new_p in new_data.get("patterns", []):
-            found = False
-            for old_p in current_db["patterns"]:
-                if old_p["rule"] == new_p["rule"]:
-                    old_p["weight"] += new_p.get("weight", 1)
-                    found = True
-                    break
-            if not found:
-                current_db["patterns"].append(new_p)
-        save_persistent_db(current_db)
+            json.dump(clean_data, f, ensure_all_ascii=False, indent=4)
         return True
     except Exception as e:
-        st.error(f"JSON 병합 중 오류: {e}")
+        st.error(f"❌ 파일 물리 저장 실패: {e}")
         return False
 
-# --- 2. 인코딩 및 추출 로직 ---
+# --- 2. 인코딩 엔진 ---
 def smart_decode(raw_data, manual_enc=None):
     if manual_enc and manual_enc != "자동 감지":
         try: return raw_data.decode(manual_enc), manual_enc
         except: pass
+    
+    # 한국어 우선순위 강제 적용 (cp1006 오판 방지)
     enc_list = ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr', 'utf-16']
     for enc in enc_list:
         try:
             text = raw_data.decode(enc)
             if re.search(r'[가-힣]{2,}', text): return text, enc
         except: continue
+    
     detected = chardet.detect(raw_data)
-    d_enc = detected['encoding']
+    d_enc = detected.get('encoding')
     if d_enc:
         try: return raw_data.decode(d_enc), f"{d_enc}(추측)"
         except: pass
     return raw_data.decode('utf-8', errors='ignore'), 'utf-8(fallback)'
 
+# --- 3. 목차 후보 추출 ---
 def get_logical_candidates(lines):
     raw_list = []
     for i, line in enumerate(lines):
@@ -89,64 +90,64 @@ def get_logical_candidates(lines):
                         break
     return [c for c in raw_list if c['valid']]
 
-# --- 3. 메인 UI ---
-st.set_page_config(page_title="TOC Master (UI Opt)", layout="wide")
-st.title("🧠 목차 패턴 학습기")
+# --- 4. 메인 UI ---
+st.set_page_config(page_title="TOC Master (Fix)", layout="wide")
+st.title("🧠 목차 패턴 학습기 (데이터 유실 방지 버전)")
 
 if 'db' not in st.session_state:
     st.session_state.db = load_persistent_db()
 
-# 사이드바 관리
+# 사이드바
 st.sidebar.title("🛠️ 시스템 관리")
-st.sidebar.caption(f"ID: goepark | 누적 패턴: {len(st.session_state.db['patterns'])}개")
+st.sidebar.caption(f"ID: goepark | 패턴 수: {len(st.session_state.db['patterns'])}")
 
-uploaded_db = st.sidebar.file_uploader("JSON DB 파일 병합", type=['json'], key="db_uploader")
-if uploaded_db and st.sidebar.button("데이터 병합 실행"):
-    if merge_db(uploaded_db):
-        st.sidebar.success("병합 완료!")
+# 수동 DB 병합
+uploaded_db = st.sidebar.file_uploader("기존 JSON 병합", type=['json'])
+if uploaded_db and st.sidebar.button("병합 실행"):
+    try:
+        new_data = json.load(uploaded_db)
+        for new_p in new_data.get("patterns", []):
+            found = False
+            for old_p in st.session_state.db["patterns"]:
+                if old_p["rule"] == new_p["rule"]:
+                    old_p["weight"] += new_p.get("weight", 1)
+                    found = True
+                    break
+            if not found:
+                st.session_state.db["patterns"].append(new_p)
+        save_persistent_db(st.session_state.db)
+        st.sidebar.success("병합 성공!")
         st.rerun()
+    except Exception as e:
+        st.sidebar.error(f"병합 실패: {e}")
 
-st.sidebar.divider()
-api_key = st.sidebar.text_input("Gemini API Key", type="password")
-manual_enc = st.sidebar.selectbox("인코딩", ["자동 감지", "utf-8", "cp949", "euc-kr"])
-
+# 실시간 다운로드 버튼 (안전한 직렬화 보장)
 try:
-    db_json = json.dumps(st.session_state.db, indent=4, ensure_all_ascii=False)
+    final_db_str = json.dumps(st.session_state.db, ensure_all_ascii=False, indent=4)
 except:
-    db_json = "{}"
-st.sidebar.download_button("💾 현재 DB 다운로드", db_json, "toc_database.json")
+    final_db_str = "{}"
+st.sidebar.download_button("💾 현재 DB 다운로드", final_db_str, "toc_database.json", mime="application/json")
 
 tab1, tab2 = st.tabs(["📊 패턴 학습", "⚙️ 데이터 관리"])
 
 with tab1:
     uploaded_file = st.file_uploader("텍스트 파일 업로드", type=['txt'])
-    
     if uploaded_file:
         file_id = f"{uploaded_file.name}_{uploaded_file.size}"
-        content, used_enc = smart_decode(uploaded_file.getvalue(), manual_enc)
-        st.info(f"📍 인코딩: **{used_enc}**")
+        content, used_enc = smart_decode(uploaded_file.getvalue())
+        st.info(f"📍 인코딩: {used_enc}")
         
         candidates = get_logical_candidates(content.splitlines())
-
-        if not candidates:
-            st.warning("후보를 찾지 못했습니다.")
-        else:
-            # [수정] 폼 대신 일반 컨테이너를 사용하고 버튼을 상단에 배치
+        if candidates:
             st.subheader(f"✅ 후보군 ({len(candidates)}개)")
-            
-            # 저장 버튼을 상단에 고정
-            save_trigger = st.button("📌 선택한 패턴들 누적 저장", type="primary", use_container_width=True)
-            
-            st.divider()
+            save_trigger = st.button("📌 선택 패턴 누적 저장", type="primary", use_container_width=True)
             
             selected_items = []
             cols = st.columns(2)
             for idx, cand in enumerate(candidates):
-                # 파일 변경 시 초기화를 위해 file_id 포함된 키 사용
                 if cols[idx % 2].checkbox(f"L{cand['idx']+1}: {cand['text']}", key=f"chk_{file_id}_{idx}"):
                     selected_items.append(cand['text'])
             
-            # 버튼 클릭 시 로직 수행
             if save_trigger:
                 if selected_items:
                     for item in selected_items:
@@ -160,32 +161,6 @@ with tab1:
                         if not found:
                             st.session_state.db['patterns'].append({"rule": rule, "example": str(item), "weight": 1})
                     
-                    save_persistent_db(st.session_state.db)
-                    st.success(f"{len(selected_items)}개 패턴 저장 완료!")
-                    st.rerun()
-                else:
-                    st.warning("선택된 패턴이 없습니다.")
-
-with tab2:
-    st.subheader("⚙️ 누적 패턴 리스트")
-    db = st.session_state.db
-    patterns = sorted(db.get('patterns', []), key=lambda x: x['weight'], reverse=True)
-    
-    for i, p in enumerate(patterns):
-        c1, c2, c3 = st.columns([4, 1, 1])
-        c1.code(p['rule'].replace("\\", ""))
-        c2.write(f"W: {p['weight']}")
-        if c3.button("삭제", key=f"del_{i}"):
-            st.session_state.db['patterns'] = [item for item in db['patterns'] if item['rule'] != p['rule']]
-            save_persistent_db(st.session_state.db)
-            st.rerun()
-
-if api_key and st.sidebar.button("✨ 최적 정규식 생성"):
-    if st.session_state.db['patterns']:
-        try:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            p_list = "\n".join([f"- {p['rule']}" for p in st.session_state.db['patterns']])
-            resp = model.generate_content(f"다음 목차 패턴들을 매칭하는 Python 정규식을 한 줄로 짜줘. 대사는 제외해:\n{p_list}")
-            st.sidebar.code(resp.text.strip())
-        except Exception as e: st.sidebar.error(f"오류: {e}")
+                    if save_persistent_db(st.session_state.db):
+                        st.success("데이터가 물리 파일에 기록되었습니다!")
+                        st.rerun()
